@@ -966,6 +966,7 @@ class Profile:
         self.devices = {}
         self.vjoy_devices = {}
         self.imports = []
+        self.modules = []
         self.merge_axes = []
         self.settings = Settings(self)
         self.parent = None
@@ -1145,9 +1146,9 @@ class Profile:
                         new_device.modes[mode].name = mode
 
         # Parse list of user modules to import
-        for child in root.iter("import"):
-            for entry in child:
-                self.imports.append(entry.get("name"))
+        # for child in root.iter("import"):
+        #     for entry in child:
+        #         self.imports.append(entry.get("name"))
 
         # Parse merge axis entries
         for child in root.iter("merge-axis"):
@@ -1155,6 +1156,12 @@ class Profile:
 
         # Parse settings entries
         self.settings.from_xml(root.find("settings"))
+
+        # Parse module entries
+        for child in root.iter("module"):
+            module = Module(self)
+            module.from_xml(child)
+            self.modules.append(module)
 
         self._update_windows_ids()
 
@@ -1184,12 +1191,13 @@ class Profile:
         root.append(vjoy_devices)
 
         # Module imports
-        import_node = ElementTree.Element("import")
-        for entry in sorted(self.imports):
-            node = ElementTree.Element("module")
-            node.set("name", entry)
-            import_node.append(node)
-        root.append(import_node)
+        # TODO: Convert to new format
+        # import_node = ElementTree.Element("import")
+        # for entry in sorted(self.imports):
+        #     node = ElementTree.Element("module")
+        #     node.set("name", entry)
+        #     import_node.append(node)
+        # root.append(import_node)
 
         # Merge axis data
         for entry in self.merge_axes:
@@ -1216,6 +1224,12 @@ class Profile:
 
         # Settings data
         root.append(self.settings.to_xml())
+
+        # Modules data
+        modules = ElementTree.Element("modules")
+        for module in self.modules:
+            modules.append(module.to_xml())
+        root.append(modules)
 
         # Serialize XML document
         ugly_xml = ElementTree.tostring(root, encoding="utf-8")
@@ -1756,3 +1770,137 @@ class ProfileData(metaclass=ABCMeta):
         :return True if all required variables are set, False otherwise
         """
         pass
+
+
+class Module:
+
+    """Custom module."""
+
+    def __init__(self, parent):
+        self.parent = parent
+        self.file_name = None
+        self.instances = []
+
+    def from_xml(self, node):
+        self.file_name = safe_read(node, "file-name", str, None)
+        for child in node.iter("instance"):
+            instance = Instance(self)
+            instance.from_xml(child)
+            self.instances.append(instance)
+
+    def to_xml(self):
+        node = ElementTree.Element("module")
+        node.set("file-name", safe_format(self.file_name, str))
+        for instance in self.instances:
+            node.append(instance.to_xml())
+        return node
+
+
+class Instance:
+
+    """Instantiation of a custom module with its own set of parameters."""
+
+    def __init__(self, parent):
+        self.parent = parent
+        self.name = None
+        self.variables = {}
+
+    def has_variable(self, name):
+        return name in self.variables
+
+    def set_variable(self, name, variable):
+        self.variables[name] = variable
+
+    def get_variable(self, name):
+        if name not in self.variables:
+            var = Variable(self)
+            var.name = name
+            self.variables[name] = var
+
+        return self.variables[name]
+
+    def from_xml(self, node):
+        self.name = safe_read(node, "name", str, "")
+        for child in node.iter("variable"):
+            variable = Variable(self)
+            variable.from_xml(child)
+            self.variables[variable.name] = variable
+
+    def to_xml(self):
+        node = ElementTree.Element("instance")
+        node.set("name", safe_format(self.name, str))
+        for variable in self.variables.values():
+            node.append(variable.to_xml())
+        return node
+
+
+class Variable:
+
+    """A single variable of a custom module instance."""
+
+    def __init__(self, parent):
+        self.parent = parent
+        self.name = None
+        self.type = None
+        self.value = None
+
+    def from_xml(self, node):
+        self.name = safe_read(node, "name", str, "")
+        self.type = VariableType.to_enum(safe_read(node, "type", str, "String"))
+
+        # Read variable content based on type information
+        if self.type == VariableType.Int:
+            self.value = safe_read(node, "value", int, 0)
+        elif self.type == VariableType.Float:
+            self.value = safe_read(node, "value", float, 0.0)
+        elif self.type == VariableType.String:
+            self.value = safe_read(node, "value", str, "")
+        elif self.type == VariableType.Bool:
+            self.value = read_bool(node, "value", False)
+        elif self.type == VariableType.Mode:
+            self.value = safe_read(node, "value", str, "")
+        elif self.type == VariableType.PhysicalInput:
+            self.value = {
+                "hardware_id": safe_read(node, "hardware_id", int, None),
+                "windows_id": safe_read(node, "windows_id", int, None),
+                "input_id": safe_read(node, "input_id", int, None),
+                "input_type": InputType.to_enum(
+                    safe_read(node, "input_type", str, None)
+                )
+            }
+        elif self.type == VariableType.VirtualInput:
+            self.value = {
+                "device_id": safe_read(node, "device_id", int, None),
+                "input_id": safe_read(node, "input_id", int, None),
+                "input_type": InputType.to_enum(
+                    safe_read(node, "input_type", str, None)
+                )
+            }
+
+
+    def to_xml(self):
+        node = ElementTree.Element("variable")
+        node.set("name", safe_format(self.name, str))
+        node.set("type", VariableType.to_string(self.type))
+
+        # Write out content based on the type
+        if self.type in [
+            VariableType.Int, VariableType.Float,
+            VariableType.String, VariableType.Mode
+        ]:
+            node.set("value", str(self.value))
+        elif self.type == VariableType.Bool:
+            node.set("value", "1" if self.value else "0")
+        elif self.type == VariableType.PhysicalInput:
+            node.set("hardware_id", safe_format(self.value["hardware_id"], int))
+            node.set("windows_id", safe_format(self.value["windows_id"], int))
+            node.set("input_id", safe_format(self.value["input_id"], int))
+            node.set("input_type",
+                     InputType.to_string(self.value["input_type"]))
+        elif self.type == VariableType.VirtualInput:
+            node.set("device_id", safe_format(self.value["device_id"], int))
+            node.set("input_id", safe_format(self.value["input_id"], int))
+            node.set("input_type", InputType.to_string(self.value["input_type"]))
+
+
+        return node
