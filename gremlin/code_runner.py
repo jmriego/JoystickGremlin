@@ -20,8 +20,8 @@ import logging
 import time
 
 import gremlin
-from gremlin import event_handler, execution_graph, input_devices, \
-    joystick_handling, macro, sendinput, util
+from gremlin import custom_module, event_handler, execution_graph, \
+    input_devices, joystick_handling, macro, sendinput, util
 import vjoy as vjoy_module
 
 
@@ -67,10 +67,35 @@ class CodeRunner:
             if settings.startup_mode in gremlin.profile.mode_list(profile):
                 start_mode = settings.startup_mode
 
-        # Load the generated code
         try:
             # Load generated python code
             gremlin_code = util.load_module("gremlin_code")
+
+            # Populate custom module variable registry
+            var_reg = custom_module.variable_registry
+            for module in profile.modules:
+                # Load module specification so we can later create multiple
+                # instances if desired
+                spec = importlib.util.spec_from_file_location(
+                    "".join(random.choices(string.ascii_lowercase, k=16)),
+                    module.file_name
+                )
+
+                # Process each instance in turn
+                for instance in module.instances:
+                    # Store variable values in the registry
+                    for var in instance.variables.values():
+                        var_reg.set(
+                            module.file_name,
+                            instance.name,
+                            var.name,
+                            var.value
+                        )
+
+                    # Load the modules
+                    tmp = importlib.util.module_from_spec(spec)
+                    tmp.identifier = (module.file_name, instance.name)
+                    spec.loader.exec_module(tmp)
 
             # Create callbacks fom the user code
             callback_count = 0

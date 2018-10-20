@@ -23,6 +23,7 @@ import gremlin.common
 import gremlin.config
 import gremlin.control_action
 import gremlin.cheatsheet
+import gremlin.custom_module
 import gremlin.error
 import gremlin.event_handler
 import gremlin.execution_graph
