@@ -60,7 +60,8 @@ class SmartToggleContainerWidget(gremlin.ui.input_item.AbstractContainerWidget):
         self.options_layout.addStretch()
 
         # Activation moment
-        self.options_layout.addWidget(QtWidgets.QLabel("<b>Activate on: </b>"))
+        self.activation_moment_box = QtWidgets.QGroupBox("Activate:")
+        self.activation_moment_layout = QtWidgets.QVBoxLayout()
         self.activate_press = QtWidgets.QRadioButton("on press")
         self.activate_release = QtWidgets.QRadioButton("on release")
         if self.profile_data.activate_on == "press":
@@ -69,11 +70,14 @@ class SmartToggleContainerWidget(gremlin.ui.input_item.AbstractContainerWidget):
             self.activate_release.setChecked(True)
         self.activate_press.toggled.connect(self._activation_changed_cb)
         self.activate_release.toggled.connect(self._activation_changed_cb)
-        self.options_layout.addWidget(self.activate_press)
-        self.options_layout.addWidget(self.activate_release)
+        self.activation_moment_layout.addWidget(self.activate_press)
+        self.activation_moment_layout.addWidget(self.activate_release)
+        self.activation_moment_box.setLayout(self.activation_moment_layout)
+        self.options_layout.addWidget(self.activation_moment_box)
 
         # Toggle type (hold / momentary)
-        self.options_layout.addWidget(QtWidgets.QLabel("<b>Toggle type:</b>"))
+        self.toggle_type_box = QtWidgets.QGroupBox("Toggle type:")
+        self.toggle_type_layout = QtWidgets.QVBoxLayout()
         self.toggle_hold = QtWidgets.QRadioButton("hold")
         self.toggle_momentary = QtWidgets.QRadioButton("momentary")
         if self.profile_data.toggle_type == "hold":
@@ -82,8 +86,10 @@ class SmartToggleContainerWidget(gremlin.ui.input_item.AbstractContainerWidget):
             self.toggle_momentary.setChecked(True)
         self.toggle_hold.toggled.connect(self._toggle_type_changed_cb)
         self.toggle_momentary.toggled.connect(self._toggle_type_changed_cb)
-        self.options_layout.addWidget(self.toggle_hold)
-        self.options_layout.addWidget(self.toggle_momentary)
+        self.toggle_type_layout.addWidget(self.toggle_hold)
+        self.toggle_type_layout.addWidget(self.toggle_momentary)
+        self.toggle_type_box.setLayout(self.toggle_type_layout)
+        self.options_layout.addWidget(self.toggle_type_box)
 
         self.action_layout.addLayout(self.options_layout)
 
@@ -194,6 +200,8 @@ class SmartToggleContainerFunctor(gremlin.base_classes.AbstractFunctor):
         self.timer = None
         self.value_press = None
         self.event_press = None
+        # TODO find proper way to do this
+        self.action_set.functors[1].needs_auto_release = False
 
     def process_event(self, event, value):
         # TODO: Currently this does not handle hat or axis events, however
@@ -214,46 +222,40 @@ class SmartToggleContainerFunctor(gremlin.base_classes.AbstractFunctor):
         # Execute smart trigger logic
         if value.current:
             self.start_time = time.time()
-            self.timer = threading.Timer(self.delay, self._long_press)
-            self.timer.start()
+            self.toggle_status = not self.toggle_status
 
             if self.activate_on == "press":
                 if self.toggle_type == "hold":
-                    self.action_set.process_event(event, value)
+                    self._process_hold_toggle(self.toggle_status, event, value)
                 else:
-                    threading.Thread(target=lambda: self._short_press(
-                        self.event_press,
-                        self.value_press)).start()
+                    self._process_momentary_toggle(event, value)
+            elif self.delay > 0.0:
+                # on release, we still want to send a toggle after delay seconds
+                self.timer = threading.Timer(self.delay, self._long_press)
+                self.timer.start()
         else:
-            # Short press
-            if (self.start_time + self.delay) > time.time():
+            if self.timer:
                 self.timer.cancel()
-
+            # Short press
+            if (self.start_time + self.delay) > time.time() or self.delay == 0.0:
                 if self.activate_on == "release":
                     if self.toggle_type == "hold":
-                        self.action_set.process_event(event, value)
+                        self._process_hold_toggle(self.toggle_status, self.event_press, self.value_press, event, value)
                     else:
-                        threading.Thread(target=lambda: self._short_press(
-                            self.event_press,
-                            self.value_press,
-                            event,
-                            value
-                        )).start()
+                        self._process_momentary_toggle(self.event_press, self.value_press, event, value)
             # Long press
             else:
-                self.long_set.process_event(event, value)
-                if self.activate_on == "release":
-                    if self.toggle_type == "hold":
-                        self.action_set.process_event(event, value)
-                    else:
-                        threading.Thread(target=lambda: self._short_press(
-                            self.event_press,
-                            self.value_press,
-                            event,
-                            value
-                        )).start()
+                if self.toggle_type == "hold":
+                    self.toggle_status = not self.toggle_status
+                    self._process_hold_toggle(self.toggle_status, self.event_press, self.value_press, event, value)
+                else:
+                    self._process_momentary_toggle(self.event_press, self.value_press, event, value)
 
-    def _short_press(self, event_p, value_p, event_r=None, value_r=None):
+            self.timer = None
+
+        return True
+
+    def _generate_events(self, event_p, value_p, event_r=None, value_r=None):
         """Callback executed for a short press action.
 
         :param event_p event to press the action
@@ -262,19 +264,41 @@ class SmartToggleContainerFunctor(gremlin.base_classes.AbstractFunctor):
         :param value_r value to release the action
         """
         if event_r is None:
-            event_r = event.clone()
+            event_r = event_p.clone()
         if value_r is None:
-            value_r = copy.deepcopy(value)
+            value_r = copy.deepcopy(value_p)
             value_r.current = False
-        self.action_set.process_event(event_p, value_p)
-        time.sleep(0.05)
-        self.action_set.process_event(event_r, value_r)
-        self.timer = None
+        return event_p, value_p, event_r, value_r
+
+    def _process_hold_toggle(self, target_status, event_p, value_p, event_r=None, value_r=None):
+        event_p, value_p, event_r, value_r = self._generate_events(
+                event_p, value_p, event_r, value_r)
+        if target_status:
+            self.action_set.process_event(event_p, value_p)
+        else:
+            self.action_set.process_event(event_r, value_r)
+        return True
+
+    def _process_momentary_toggle(self, event_p, value_p, event_r=None, value_r=None):
+        def _send_momentary_toggle_events(event_p, value_p, event_r, value_r):
+            self.action_set.process_event(event_p, value_p)
+            time.sleep(0.05)
+            self.action_set.process_event(event_r, value_r)
+
+        event_p, value_p, event_r, value_r = self._generate_events(
+                event_p, value_p, event_r, value_r)
+
+        threading.Thread(target=lambda: _send_momentary_toggle_events(
+            event_p, value_p, event_r, value_r)).start()
+
         return True
 
     def _long_press(self):
         """Callback executed, when the delay expires."""
-        self.action_set.process_event(self.event_press, self.value_press)
+        if self.toggle_type == "hold":
+            self._process_hold_toggle(self.toggle_status, self.event_press, self.value_press)
+        else:
+            self._process_momentary_toggle(self.event_press, self.value_press)
 
 
 class SmartToggleContainer(gremlin.base_classes.AbstractContainer):
